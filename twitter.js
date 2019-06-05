@@ -327,7 +327,7 @@ Twitter.prototype.uploadVideo = function (params, isExternal, accessToken, acces
   }
 };
 
-Twitter.prototype._initMediaUpload = function (oauth, type, callback) {
+Twitter.prototype._initMediaUpload = function (oauth, type, size, callback) {
   const options = {
     url: uploadBaseUrl + 'media/upload.json',
     oauth,
@@ -335,8 +335,7 @@ Twitter.prototype._initMediaUpload = function (oauth, type, callback) {
       command: 'INIT',
       'media_type': type,
       'media_category': 'tweet_video',
-      //todo update
-      'total_bytes': 1475,
+      'total_bytes': size,
     }
   };
   return request.post(options, function (error, response, body) {
@@ -348,15 +347,19 @@ Twitter.prototype._appendMediaUpload = function(oauth, data, mediaId, segmentInd
   const options = {
     url: uploadBaseUrl + 'media/upload.json',
     oauth,
-    form: {
+    formData: {
       command: 'APPEND',
-      'media_id': mediaId,
-      'segment_index': segmentIndex,
-      'media_data': data.toString('base64')
+      media_id: mediaId,
+      segment_index: segmentIndex,
+      media_data: data
     }
   };
-  return request.post(options, function () {
-    cb();
+  return request.post(options, function (err, response) {
+    var error;
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      error = { code: response.statusCode, message: 'Failed uploading video' };
+    }
+    cb(err || error, segmentIndex, response);
   })
 };
 
@@ -366,11 +369,15 @@ Twitter.prototype._finalizeMediaUpload = function(oAuthCredentials, mediaId, cb)
     oauth: oAuthCredentials,
     formData: {
       command: 'FINALIZE',
-      'media_id': mediaId
+      media_id: mediaId
     }
   }
-  return request.post(options, function () {
-    cb();
+  return request.post(options, function (err, response, a, b) {
+    var error;
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      error = { code: response.statusCode, message: 'Failed uploading video' };
+    }
+    cb(err || error);
   })
 };
 
@@ -381,8 +388,11 @@ Twitter.prototype._getStatusMediaUpload = function(oa, oAuthCredentials, mediaId
     'media_id': mediaId
   }
 
-  oa.get(url + "?" + querystring.stringify(params), oAuthCredentials.token, oAuthCredentials.token_secret, function (resultArray, t) {
-    const body = JSON.parse(resultArray[1]);
+  oa.get(url + "?" + querystring.stringify(params), oAuthCredentials.token, oAuthCredentials.token_secret, function (result, body) {
+    error = JSON.parse(body).error;
+    if (error) {
+      return cb(error)
+    }
     if (body['processing_info']) {
       // if processing info is present return it
       const processingInfo = body['processing_info'];
@@ -398,14 +408,14 @@ Twitter.prototype._getStatusMediaUpload = function(oa, oAuthCredentials, mediaId
         state: 'unknown',
         'progress_percent': lastProgressPercent
       };
-      return cb(processingInfo)
+      return cb(null, processingInfo)
     }
   })
 };
 
-Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, mediaId, _appendMediaUpload, _finalizeMediaUpload, cb) {
+Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, mediaId, _appendMediaUpload, _finalizeMediaUpload, cb, baseSize) {
   let segmentIndex = 0;
-  let chunkUploadInProgress = false;
+  let loaded = 0;
   let streamReadingEnded = false;
   const res = request.get(originalUrl);
   res.on('response', function (resp) {
@@ -418,16 +428,36 @@ Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, med
   res.on('error', function (err) {
     return cb(err)
   });
+  loaded = 0;
+  var size = 0;
   res.on('data', function (chunk) {
-    res.pause();
-    chunkUploadInProgress = true;
-    _appendMediaUpload(oAuthCreds, chunk, mediaId, segmentIndex, function () {
-      segmentIndex++;
-      res.resume();
-      chunkUploadInProgress = false;
-      if (!chunkUploadInProgress && streamReadingEnded) {
-        return _finalizeMediaUpload(oAuthCreds, mediaId, function () {
-          return cb(null, mediaId)
+    // res.pause();
+    var error = null;
+    var data = chunk.toString('base64');
+    size += data.length;
+    if (error) {
+      return cb(error);
+    }
+    segmentIndex++;
+    _appendMediaUpload(oAuthCreds, data, mediaId, segmentIndex, function (err, si,body,ch) {
+      if (err) {
+        const a = si;
+        const b = body;
+        const c = body;
+        error = err;
+        return cb(error);
+      }
+      // res.resume();
+      // chunkUploadInProgress = false;
+      loaded++;
+      if (loaded === 253) {
+        console.info('aa');
+      }
+      if ((loaded === segmentIndex) && streamReadingEnded) {
+        var y = size;
+        var x = baseSize;
+        return _finalizeMediaUpload(oAuthCreds, mediaId, function (error) {
+          return cb(error)
         })
       }
     })
@@ -435,11 +465,6 @@ Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, med
 
   res.on('end', function () {
     streamReadingEnded = true;
-    if (!chunkUploadInProgress && streamReadingEnded) {
-      return _finalizeMediaUpload(oAuthCreds, mediaId, function () {
-        return cb(null, mediaId)
-      })
-    }
   })
 };
 
@@ -455,7 +480,7 @@ Twitter.prototype.uploadExternalMediaChunked = function (params, media_type, acc
   var _appendMediaUpload = this._appendMediaUpload;
   var _finalizeMediaUpload = this._finalizeMediaUpload;
   var oa = this.oa;
-  this._initMediaUpload(oauth, media_type, function (error, body) {
+  this._initMediaUpload(oauth, media_type, params.size, function (error, body) {
     if (error) {
       return callback(error);
     }
@@ -471,14 +496,16 @@ Twitter.prototype.uploadExternalMediaChunked = function (params, media_type, acc
       let state = 'pending';
       let progressPercent = 0;
       const startTime = Date.now();
-      while (state !== 'succeeded' && ((Date.now() - startTime) < 3000000 * 1000)) {
-        _getStatusMediaUpload(oa, oauth, mediaId, progressPercent, function (processingInfo) {
-          state = processingInfo.state;
-          progressPercent = processingInfo.progress_percent;
-        });
-      }
-      callback(null, mediaId);
-    })
+      // while (state !== 'succeeded' && ((Date.now() - startTime) < 3000000 * 1000)) {
+      //       //   setTimeout(function () {
+      //       //   }, 5000);
+      //       // }
+      _getStatusMediaUpload(oa, oauth, mediaId, progressPercent, function (error, processingInfo) {
+        state = processingInfo.state;
+        progressPercent = processingInfo.progress_percent;
+        callback(null, mediaId);
+      });
+    }, params.size)
   });
 };
 
