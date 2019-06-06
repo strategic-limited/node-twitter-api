@@ -333,9 +333,9 @@ Twitter.prototype._initMediaUpload = function (oauth, type, size, callback) {
     oauth,
     formData: {
       command: 'INIT',
-      'media_type': type,
-      'media_category': 'tweet_video',
-      'total_bytes': size,
+      media_type: type,
+      media_category: 'tweet_video',
+      total_bytes: size,
     }
   };
   return request.post(options, function (error, response, body) {
@@ -359,7 +359,7 @@ Twitter.prototype._appendMediaUpload = function(oauth, data, mediaId, segmentInd
     if (response.statusCode < 200 || response.statusCode >= 300) {
       error = { code: response.statusCode, message: 'Failed uploading video' };
     }
-    cb(err || error, segmentIndex, response);
+    cb(err || error, segmentIndex, response, data);
   })
 };
 
@@ -418,6 +418,7 @@ Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, med
   let loaded = 0;
   let streamReadingEnded = false;
   const res = request.get(originalUrl);
+  res.setEncoding('base64');
   res.on('response', function (resp) {
     if (resp.statusCode !== 200) {
       const error = new Error(`request failed : ${resp.statusCode}`);
@@ -433,8 +434,8 @@ Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, med
   res.on('data', function (chunk) {
     // res.pause();
     var error = null;
-    var data = chunk.toString('base64');
-    size += data.length;
+    var data = chunk;
+    size += chunk.length;
     if (error) {
       return cb(error);
     }
@@ -457,7 +458,7 @@ Twitter.prototype._streamMediaToTwitter = function (oAuthCreds, originalUrl, med
         var y = size;
         var x = baseSize;
         return _finalizeMediaUpload(oAuthCreds, mediaId, function (error) {
-          return cb(error)
+          return cb(error,mediaId)
         })
       }
     })
@@ -496,10 +497,8 @@ Twitter.prototype.uploadExternalMediaChunked = function (params, media_type, acc
       let state = 'pending';
       let progressPercent = 0;
       const startTime = Date.now();
-      // while (state !== 'succeeded' && ((Date.now() - startTime) < 3000000 * 1000)) {
-      //       //   setTimeout(function () {
-      //       //   }, 5000);
-      //       // }
+      //todo until state !== 'succeeded'
+
       _getStatusMediaUpload(oa, oauth, mediaId, progressPercent, function (error, processingInfo) {
         state = processingInfo.state;
         progressPercent = processingInfo.progress_percent;
